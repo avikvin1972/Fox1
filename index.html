@@ -308,15 +308,12 @@ function speak(text){
 // Распознавание речи (только для механики "Повтори")
 // ---------------------------------------------------------------
 const SpeechRecognitionAPI = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-if(SpeechRecognitionAPI){
-  recognition = new SpeechRecognitionAPI();
-  recognition.lang = 'en-US';
-  recognition.interimResults = false;
-  recognition.maxAlternatives = 1;
-}
+// На части Android-устройств один и тот же объект распознавания после
+// нескольких циклов запуск/остановка "залипает". Поэтому создаём новый
+// экземпляр на каждую попытку, а не переиспользуем один на весь сеанс.
+let activeRecognition = null;
 function stopRecognitionIfAny(){
-  if(recognition){ try{ recognition.stop(); }catch(e){} }
+  if(activeRecognition){ try{ activeRecognition.abort(); }catch(e){} activeRecognition = null; }
   window.speechSynthesis && window.speechSynthesis.cancel();
 }
 function normalize(s){
@@ -469,7 +466,7 @@ function handleChoice(btn, opt, correctWord){
 let recognizing = false;
 
 micBig.addEventListener('click', ()=>{
-  if(!recognition){
+  if(!SpeechRecognitionAPI){
     feedbackLine.textContent = 'На этом устройстве нет распознавания речи';
     feedbackLine.className = 'feedback-line bad';
     return;
@@ -477,15 +474,34 @@ micBig.addEventListener('click', ()=>{
   if(session.solvedThisRound || recognizing) return;
 
   const expected = currentRound().word.en;
+  const rec = new SpeechRecognitionAPI();
+  rec.lang = 'en-US';
+  rec.interimResults = false;
+  rec.maxAlternatives = 5;
+  activeRecognition = rec;
 
-  recognition.maxAlternatives = 5;
-  recognition.onstart = ()=>{
+  let settled = false; // чтобы не среагировать дважды на одну попытку
+  const safetyTimeout = setTimeout(()=>{
+    if(settled) return;
+    settled = true;
+    recognizing = false;
+    micBig.classList.remove('listening');
+    try{ rec.abort(); }catch(e){}
+    if(activeRecognition === rec) activeRecognition = null;
+    feedbackLine.textContent = 'Не получилось расслышать, нажми ещё раз 🎤';
+    feedbackLine.className = 'feedback-line bad';
+  }, 7000);
+
+  rec.onstart = ()=>{
     recognizing = true;
     micBig.classList.add('listening');
     feedbackLine.textContent = 'Слушаю...';
     feedbackLine.className = 'feedback-line';
   };
-  recognition.onresult = (event)=>{
+  rec.onresult = (event)=>{
+    if(settled) return;
+    settled = true;
+    clearTimeout(safetyTimeout);
     const alternatives = event.results[0];
     let matched = false;
     for(let i=0; i<alternatives.length; i++){
@@ -498,7 +514,10 @@ micBig.addEventListener('click', ()=>{
       feedbackLine.className = 'feedback-line bad';
     }
   };
-  recognition.onerror = (event)=>{
+  rec.onerror = (event)=>{
+    if(settled) return;
+    settled = true;
+    clearTimeout(safetyTimeout);
     recognizing = false;
     micBig.classList.remove('listening');
     const msg = event.error === 'no-speech'
@@ -509,19 +528,20 @@ micBig.addEventListener('click', ()=>{
     feedbackLine.textContent = msg;
     feedbackLine.className = 'feedback-line bad';
   };
-  recognition.onend = ()=>{
+  rec.onend = ()=>{
     recognizing = false;
     micBig.classList.remove('listening');
+    if(activeRecognition === rec) activeRecognition = null;
   };
 
   try{
-    recognition.start();
+    rec.start();
   }catch(e){
-    // Например, распознавание уже было запущено и не успело закрыться —
-    // сбрасываем состояние, чтобы кнопка не зависала навсегда.
+    clearTimeout(safetyTimeout);
+    settled = true;
     recognizing = false;
     micBig.classList.remove('listening');
-    try{ recognition.abort(); }catch(e2){}
+    if(activeRecognition === rec) activeRecognition = null;
     feedbackLine.textContent = 'Нажми на микрофон ещё раз';
     feedbackLine.className = 'feedback-line bad';
   }

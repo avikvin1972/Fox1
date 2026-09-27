@@ -322,6 +322,31 @@ function stopRecognitionIfAny(){
 function normalize(s){
   return (s||'').toLowerCase().replace(/[^a-z]/g,'').trim();
 }
+function levenshtein(a, b){
+  const m = a.length, n = b.length;
+  const dp = Array.from({length:m+1}, ()=> new Array(n+1).fill(0));
+  for(let i=0;i<=m;i++) dp[i][0]=i;
+  for(let j=0;j<=n;j++) dp[0][j]=j;
+  for(let i=1;i<=m;i++){
+    for(let j=1;j<=n;j++){
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1]
+        : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+    }
+  }
+  return dp[m][n];
+}
+// Ребёнок произносит слова неидеально — проверяем не только точное
+// совпадение, но и близкие по звучанию варианты (расстояние Левенштейна),
+// а также все альтернативные варианты распознавания, а не только первый.
+function isCloseMatch(said, expected){
+  const s = normalize(said);
+  const e = normalize(expected);
+  if(!s) return false;
+  if(s === e || s.includes(e) || e.includes(s)) return true;
+  const maxDist = e.length <= 4 ? 1 : 2;
+  return levenshtein(s, e) <= maxDist;
+}
 
 // ---------------------------------------------------------------
 // Игровая сессия уровня
@@ -441,37 +466,65 @@ function handleChoice(btn, opt, correctWord){
   }
 }
 
+let recognizing = false;
+
 micBig.addEventListener('click', ()=>{
   if(!recognition){
     feedbackLine.textContent = 'На этом устройстве нет распознавания речи';
     feedbackLine.className = 'feedback-line bad';
     return;
   }
-  if(session.solvedThisRound) return;
-  micBig.classList.add('listening');
-  feedbackLine.textContent = 'Слушаю...';
-  feedbackLine.className = 'feedback-line';
+  if(session.solvedThisRound || recognizing) return;
 
-  const expected = normalize(currentRound().word.en);
+  const expected = currentRound().word.en;
 
+  recognition.maxAlternatives = 5;
+  recognition.onstart = ()=>{
+    recognizing = true;
+    micBig.classList.add('listening');
+    feedbackLine.textContent = 'Слушаю...';
+    feedbackLine.className = 'feedback-line';
+  };
   recognition.onresult = (event)=>{
-    const said = event.results[0][0].transcript;
-    const ok = normalize(said).includes(expected) || expected.includes(normalize(said));
-    if(ok){
+    const alternatives = event.results[0];
+    let matched = false;
+    for(let i=0; i<alternatives.length; i++){
+      if(isCloseMatch(alternatives[i].transcript, expected)){ matched = true; break; }
+    }
+    if(matched){
       onRoundCorrect();
     } else {
-      feedbackLine.textContent = 'Почти! Повтори: "' + currentRound().word.en + '"';
+      feedbackLine.textContent = 'Почти! Повтори: "' + expected + '"';
       feedbackLine.className = 'feedback-line bad';
     }
   };
-  recognition.onerror = ()=>{
-    feedbackLine.textContent = 'Не расслышал, нажми ещё раз 🎤';
+  recognition.onerror = (event)=>{
+    recognizing = false;
+    micBig.classList.remove('listening');
+    const msg = event.error === 'no-speech'
+      ? 'Не услышал голос, нажми на микрофон и говори сразу'
+      : event.error === 'not-allowed'
+      ? 'Доступ к микрофону запрещён в настройках браузера'
+      : 'Не расслышал, нажми ещё раз 🎤';
+    feedbackLine.textContent = msg;
     feedbackLine.className = 'feedback-line bad';
   };
   recognition.onend = ()=>{
+    recognizing = false;
     micBig.classList.remove('listening');
   };
-  try{ recognition.start(); }catch(e){}
+
+  try{
+    recognition.start();
+  }catch(e){
+    // Например, распознавание уже было запущено и не успело закрыться —
+    // сбрасываем состояние, чтобы кнопка не зависала навсегда.
+    recognizing = false;
+    micBig.classList.remove('listening');
+    try{ recognition.abort(); }catch(e2){}
+    feedbackLine.textContent = 'Нажми на микрофон ещё раз';
+    feedbackLine.className = 'feedback-line bad';
+  }
 });
 
 function onRoundCorrect(){
